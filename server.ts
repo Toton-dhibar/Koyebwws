@@ -1,19 +1,20 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// 🔒 Hardcoded Target
+// 🔒 Hardcoded Target Server
 const TARGET_HOST = "zz.sdbuild.me";
 const TARGET_HTTPS = `https://${TARGET_HOST}`;
 const TARGET_WSS = `wss://${TARGET_HOST}`;
 
-// ✅ IMPORTANT: Koyeb dynamic port
-const PORT = parseInt(Deno.env.get("PORT") || "8000");
+// ⚠️ Koyeb Dynamic Port (VERY IMPORTANT)
+const PORT = parseInt(Deno.env.get("PORT")!);
 
-// ---------------- WebSocket Handler ----------------
+// ---------------- WebSocket Handler (/wsvm only) ----------------
 
 async function handleWebSocket(req: Request): Promise<Response> {
   const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
   const url = new URL(req.url);
 
+  // Forward to target with same path/query
   const targetWsUrl = `${TARGET_WSS}${url.pathname}${url.search}`;
   const targetWs = new WebSocket(targetWsUrl);
 
@@ -24,7 +25,7 @@ async function handleWebSocket(req: Request): Promise<Response> {
     try { targetWs.close(); } catch {}
   };
 
-  // Heartbeat (avoid idle timeout)
+  // ❤️ Heartbeat to reduce idle timeout
   const heartbeat = setInterval(() => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send("ping");
@@ -32,7 +33,9 @@ async function handleWebSocket(req: Request): Promise<Response> {
   }, 20000);
 
   targetWs.onopen = () => {
-    while (queue.length) targetWs.send(queue.shift());
+    while (queue.length) {
+      targetWs.send(queue.shift());
+    }
   };
 
   clientWs.onmessage = (e) => {
@@ -49,11 +52,10 @@ async function handleWebSocket(req: Request): Promise<Response> {
     }
   };
 
-  targetWs.onclose = cleanup;
-  clientWs.onclose = cleanup;
   targetWs.onerror = cleanup;
   clientWs.onerror = cleanup;
 
+  targetWs.onclose = cleanup;
   clientWs.onclose = () => {
     clearInterval(heartbeat);
     cleanup();
@@ -62,7 +64,7 @@ async function handleWebSocket(req: Request): Promise<Response> {
   return response;
 }
 
-// ---------------- HTTP Proxy Handler ----------------
+// ---------------- HTTP Reverse Proxy ----------------
 
 async function handleHTTP(req: Request): Promise<Response> {
   try {
@@ -118,10 +120,18 @@ async function handleHTTP(req: Request): Promise<Response> {
 // ---------------- Main Server ----------------
 
 serve((req: Request) => {
-  if (req.headers.get("upgrade")?.toLowerCase().includes("websocket")) {
+  const url = new URL(req.url);
+
+  // WebSocket only on /wsvm
+  if (
+    url.pathname === "/wsvm" &&
+    req.headers.get("upgrade")?.toLowerCase().includes("websocket")
+  ) {
     return handleWebSocket(req);
   }
+
   return handleHTTP(req);
+
 }, { port: PORT });
 
-console.log(`🚀 Proxy running on port ${PORT}`);
+console.log(`🚀 Server running on port ${PORT}`);
