@@ -1,105 +1,96 @@
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+// server.ts
 
-// 🔒 Hardcoded Target Server
-const TARGET_HOST = "zz.sdbuild.me";
-const TARGET_HTTPS = `https://${TARGET_HOST}`;
-const TARGET_WSS = `wss://${TARGET_HOST}`;
+const TARGET_HOST = 'zz.sdbuild.me';
 
-// ⚠️ Koyeb Dynamic Port (VERY IMPORTANT)
-const PORT = parseInt(Deno.env.get("PORT")!);
+console.log(`🚀 Proxy Server running on port 8000`);
+console.log(`🎯 Target Host: ${TARGET_HOST}`);
 
-// ---------------- WebSocket Handler (/wsvm only) ----------------
-
-async function handleWebSocket(req: Request): Promise<Response> {
-  const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
+Deno.serve({ port: 8000 }, async (req) => {
   const url = new URL(req.url);
 
-  // Forward to target with same path/query
-  const targetWsUrl = `${TARGET_WSS}${url.pathname}${url.search}`;
-  const targetWs = new WebSocket(targetWsUrl);
+  // 1. WebSocket Handler
+  if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+    try {
+      const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
+      const targetWsUrl = `wss://${TARGET_HOST}${url.pathname}${url.search}`;
+      
+      console.log(`🔌 Proxying WebSocket: ${url.pathname} -> ${targetWsUrl}`);
 
-  const queue: any[] = [];
+      const targetWs = new WebSocket(targetWsUrl);
+      const queue: string[] = [];
 
-  const cleanup = () => {
-    try { clientWs.close(); } catch {}
-    try { targetWs.close(); } catch {}
-  };
+      targetWs.onopen = () => {
+        while (queue.length > 0) {
+          const msg = queue.shift();
+          if (msg) targetWs.send(msg);
+        }
+      };
 
-  // ❤️ Heartbeat to reduce idle timeout
-  const heartbeat = setInterval(() => {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send("ping");
+      clientWs.onmessage = (e) => {
+        if (targetWs.readyState === WebSocket.OPEN) {
+          targetWs.send(e.data);
+        } else {
+          queue.push(e.data);
+        }
+      };
+
+      targetWs.onmessage = (e) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(e.data);
+        }
+      };
+
+      const cleanup = () => {
+        try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(); } catch (_) {}
+        try { if (targetWs.readyState === WebSocket.OPEN) targetWs.close(); } catch (_) {}
+      };
+
+      targetWs.onclose = cleanup;
+      clientWs.onclose = cleanup;
+      targetWs.onerror = cleanup;
+      clientWs.onerror = cleanup;
+
+      return response;
+    } catch (wsErr) {
+      console.error("WebSocket Error:", wsErr);
+      return new Response("WebSocket Error", { status: 500 });
     }
-  }, 20000);
+  }
 
-  targetWs.onopen = () => {
-    while (queue.length) {
-      targetWs.send(queue.shift());
-    }
-  };
-
-  clientWs.onmessage = (e) => {
-    if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.send(e.data);
-    } else {
-      queue.push(e.data);
-    }
-  };
-
-  targetWs.onmessage = (e) => {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(e.data);
-    }
-  };
-
-  targetWs.onerror = cleanup;
-  clientWs.onerror = cleanup;
-
-  targetWs.onclose = cleanup;
-  clientWs.onclose = () => {
-    clearInterval(heartbeat);
-    cleanup();
-  };
-
-  return response;
-}
-
-// ---------------- HTTP Reverse Proxy ----------------
-
-async function handleHTTP(req: Request): Promise<Response> {
+  // 2. HTTP Proxy Handler
   try {
-    const url = new URL(req.url);
-    const targetUrl = `${TARGET_HTTPS}${url.pathname}${url.search}`;
-
+    const targetUrl = `https://${TARGET_HOST}${url.pathname}${url.search}`;
+    
+    // Create a clean set of headers
     const headers = new Headers();
-    const skipHeaders = [
-      "host",
-      "connection",
-      "upgrade",
-      "keep-alive",
-      "proxy-connection"
-    ];
-
+    // Headers to strip to avoid conflicts
+    const skipHeaders = ['host', 'connection', 'upgrade', 'keep-alive', 'proxy-connection', 'content-length'];
+    
     for (const [key, value] of req.headers.entries()) {
       if (!skipHeaders.includes(key.toLowerCase())) {
         headers.set(key, value);
       }
     }
 
-    headers.set("Host", TARGET_HOST);
+    // Explicitly set the Host header for the target
+    headers.set('Host', TARGET_HOST);
 
     const res = await fetch(targetUrl, {
       method: req.method,
       headers,
-      body: ["GET", "HEAD"].includes(req.method)
-        ? undefined
-        : req.body,
-      redirect: "manual",
+      body: !['GET', 'HEAD'].includes(req.method) ? req.body : null,
+      redirect: 'manual',
     });
 
+    // Strip hop-by-hop headers from response
     const resHeaders = new Headers(res.headers);
-    resHeaders.delete("transfer-encoding");
-    resHeaders.delete("content-encoding");
+    resHeaders.delete('content-encoding');
+    resHeaders.delete('transfer-encoding');
+
+    // CORS (Optional: allows access from anywhere)
+    resHeaders.set('Access-Control-Allow-Origin', '*');
+    resHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    resHeaders.set('Access-Control-Allow-Headers', '*');
 
     return new Response(res.body, {
       status: res.status,
@@ -107,31 +98,10 @@ async function handleHTTP(req: Request): Promise<Response> {
     });
 
   } catch (err: any) {
-    return new Response(
-      JSON.stringify({ error: "Proxy Error", detail: err.message }),
-      {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      }
-    );
+    console.error("Fetch Error:", err.message);
+    return new Response(JSON.stringify({ error: 'Proxy Error', details: err.message }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
-}
-
-// ---------------- Main Server ----------------
-
-serve((req: Request) => {
-  const url = new URL(req.url);
-
-  // WebSocket only on /wsvm
-  if (
-    url.pathname === "/wsvm" &&
-    req.headers.get("upgrade")?.toLowerCase().includes("websocket")
-  ) {
-    return handleWebSocket(req);
-  }
-
-  return handleHTTP(req);
-
-}, { port: PORT });
-
-console.log(`🚀 Server running on port ${PORT}`);
+});
