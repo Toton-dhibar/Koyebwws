@@ -1,9 +1,8 @@
-FROM denoland/deno:alpine-1.44.0
+FROM denoland/deno:alpine-1.42.4
 
 WORKDIR /app
-COPY . .
 
-RUN deno cache server.ts
+COPY server.ts .
 
 EXPOSE 8000
 
