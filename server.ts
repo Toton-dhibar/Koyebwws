@@ -1,83 +1,127 @@
-// Koyeb-compatible Deno WebSocket & HTTP Proxy
-const TARGET_HOST = 'zz.sdbuild.me';
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-Deno.serve(async (req) => {
+// 🔒 Hardcoded Target
+const TARGET_HOST = "zz.sdbuild.me";
+const TARGET_HTTPS = `https://${TARGET_HOST}`;
+const TARGET_WSS = `wss://${TARGET_HOST}`;
+
+// ✅ IMPORTANT: Koyeb dynamic port
+const PORT = parseInt(Deno.env.get("PORT") || "8000");
+
+// ---------------- WebSocket Handler ----------------
+
+async function handleWebSocket(req: Request): Promise<Response> {
+  const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
   const url = new URL(req.url);
 
-  // 1. WebSocket Handler
-  if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-    try {
-      const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
-      const targetWsUrl = `wss://${TARGET_HOST}${url.pathname}${url.search}`;
-      
-      const targetWs = new WebSocket(targetWsUrl);
-      const queue = [];
+  const targetWsUrl = `${TARGET_WSS}${url.pathname}${url.search}`;
+  const targetWs = new WebSocket(targetWsUrl);
 
-      targetWs.onopen = () => {
-        while (queue.length > 0) targetWs.send(queue.shift());
-      };
+  const queue: any[] = [];
 
-      clientWs.onmessage = (e) => {
-        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(e.data);
-        else queue.push(e.data);
-      };
+  const cleanup = () => {
+    try { clientWs.close(); } catch {}
+    try { targetWs.close(); } catch {}
+  };
 
-      targetWs.onmessage = (e) => {
-        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(e.data);
-      };
-
-      const cleanup = () => {
-        try { clientWs.close(); } catch (_) {}
-        try { targetWs.close(); } catch (_) {}
-      };
-
-      targetWs.onclose = cleanup;
-      clientWs.onclose = cleanup;
-
-      return response;
-    } catch (wsErr) {
-      return new Response("WebSocket Error", { status: 500 });
+  // Heartbeat (avoid idle timeout)
+  const heartbeat = setInterval(() => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send("ping");
     }
-  }
+  }, 20000);
 
-  // 2. HTTP Proxy Handler
+  targetWs.onopen = () => {
+    while (queue.length) targetWs.send(queue.shift());
+  };
+
+  clientWs.onmessage = (e) => {
+    if (targetWs.readyState === WebSocket.OPEN) {
+      targetWs.send(e.data);
+    } else {
+      queue.push(e.data);
+    }
+  };
+
+  targetWs.onmessage = (e) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(e.data);
+    }
+  };
+
+  targetWs.onclose = cleanup;
+  clientWs.onclose = cleanup;
+  targetWs.onerror = cleanup;
+  clientWs.onerror = cleanup;
+
+  clientWs.onclose = () => {
+    clearInterval(heartbeat);
+    cleanup();
+  };
+
+  return response;
+}
+
+// ---------------- HTTP Proxy Handler ----------------
+
+async function handleHTTP(req: Request): Promise<Response> {
   try {
-    const targetUrl = `https://${TARGET_HOST}${url.pathname}${url.search}`;
-    
-    // Create a clean set of headers
+    const url = new URL(req.url);
+    const targetUrl = `${TARGET_HTTPS}${url.pathname}${url.search}`;
+
     const headers = new Headers();
-    const skipHeaders = ['host', 'connection', 'upgrade', 'keep-alive', 'proxy-connection'];
-    
+    const skipHeaders = [
+      "host",
+      "connection",
+      "upgrade",
+      "keep-alive",
+      "proxy-connection"
+    ];
+
     for (const [key, value] of req.headers.entries()) {
       if (!skipHeaders.includes(key.toLowerCase())) {
         headers.set(key, value);
       }
     }
 
-    headers.set('Host', TARGET_HOST);
+    headers.set("Host", TARGET_HOST);
 
     const res = await fetch(targetUrl, {
       method: req.method,
       headers,
-      body: !['GET', 'HEAD'].includes(req.method) ? req.body : null,
-      redirect: 'manual',
+      body: ["GET", "HEAD"].includes(req.method)
+        ? undefined
+        : req.body,
+      redirect: "manual",
     });
 
-    // Strip hop-by-hop headers
     const resHeaders = new Headers(res.headers);
-    resHeaders.delete('content-encoding');
-    resHeaders.delete('transfer-encoding');
+    resHeaders.delete("transfer-encoding");
+    resHeaders.delete("content-encoding");
 
     return new Response(res.body, {
       status: res.status,
       headers: resHeaders,
     });
 
-  } catch (err) {
-    console.error("Fetch Error:", err.message);
-    return new Response(JSON.stringify({ error: 'Proxy Error', details: err.message }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' }
-    });
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({ error: "Proxy Error", detail: err.message }),
+      {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }
+    );
   }
-});
+}
+
+// ---------------- Main Server ----------------
+
+serve((req: Request) => {
+  if (req.headers.get("upgrade")?.toLowerCase().includes("websocket")) {
+    return handleWebSocket(req);
+  }
+  return handleHTTP(req);
+}, { port: PORT });
+
+console.log(`🚀 Proxy running on port ${PORT}`);
