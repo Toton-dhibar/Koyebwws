@@ -1,4 +1,7 @@
-  const TARGET_HOST = 'zz.sdbuild.me';
+// Koyeb-compatible Deno WebSocket & HTTP Proxy
+const TARGET_HOST = 'zz.sdbuild.me';
+
+Deno.serve(async (req) => {
   const url = new URL(req.url);
 
   // 1. WebSocket Handler
@@ -37,7 +40,7 @@
     }
   }
 
-  // 2. HTTP Proxy Handler (Fixed for 'Refused Stream' error)
+  // 2. HTTP Proxy Handler
   try {
     const targetUrl = `https://${TARGET_HOST}${url.pathname}${url.search}`;
     
@@ -51,7 +54,6 @@
       }
     }
 
-    // Explicitly set the Host header for the target
     headers.set('Host', TARGET_HOST);
 
     const res = await fetch(targetUrl, {
@@ -61,7 +63,7 @@
       redirect: 'manual',
     });
 
-    // Strip hop-by-hop headers from response
+    // Strip hop-by-hop headers
     const resHeaders = new Headers(res.headers);
     resHeaders.delete('content-encoding');
     resHeaders.delete('transfer-encoding');
